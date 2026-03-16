@@ -1,0 +1,127 @@
+#!/bin/bash
+
+# --- CONFIGURATION PATHS ---
+BIN_PATH="$HOME/.local/bin/ha-lock-listener.sh"
+CONF_DIR="$HOME/.config/ha-lock"
+SERVICE_PATH="$HOME/.config/systemd/user/ha-lock.service"
+
+# --- UNINSTALL FUNCTION ---
+uninstall() {
+    echo "🗑️  Starting uninstallation..."
+    systemctl --user stop ha-lock.service 2>/dev/null
+    systemctl --user disable ha-lock.service 2>/dev/null
+    rm -f "$SERVICE_PATH" "$BIN_PATH"
+    rm -rf "$CONF_DIR"
+    systemctl --user daemon-reload
+    echo "✅ Uninstalled successfully."
+    exit 0
+}
+
+if [[ "$1" == "--uninstall" ]]; then uninstall; fi
+
+# --- INSTALLER LOGIC ---
+mkdir -p ~/.local/bin ~/.config/ha-lock ~/.config/systemd/user/
+
+echo "--- Home Assistant Linux Lock Setup (Webhook Edition) ---"
+
+while true; do
+    read -p "Enter HA URL (e.g., http://192.168.1.50:8123): " IN_URL
+    IN_URL=$(echo "$IN_URL" | sed 's:/*$::')
+    read -p "Enter Webhook ID (e.g., 67f51aa4d11340af409d166f): " IN_WEBHOOK
+
+    echo -e "\nTesting connection..."
+
+    # Perform test capturing headers (-i), body, and appending HTTP code
+    TEST_RES=$(curl -s -i -w "\nHTTP_STATUS:%{http_code}" -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"state\": \"off\"}" \
+        "$IN_URL/api/webhook/$IN_WEBHOOK")
+
+    HTTP_STATUS=$(echo "$TEST_RES" | awk -F':' '/^HTTP_STATUS:/ {print $2}')
+    RAW_RESPONSE=$(echo "$TEST_RES" | sed '/^HTTP_STATUS:/d')
+
+    echo -e "\n--- FULL HTTP RESPONSE ---"
+    echo "$RAW_RESPONSE"
+    echo "--------------------------"
+
+    # Webhooks in HA typically return 200 OK with an empty body on success
+    if [[ "$HTTP_STATUS" == "200" || "$HTTP_STATUS" == "201" ]]; then
+        echo "✅ Success! Webhook triggered successfully."
+        break
+    else
+        echo "❌ Error: HTTP $HTTP_STATUS"
+        echo "Note: If you get a 405, ensure 'allowed_methods: [POST]' is set in the automation."
+        read -p "Try again? (y/n): " RETRY
+        [[ ! "$RETRY" =~ ^[Yy]$ ]] && exit 1
+    fi
+done
+
+# Create Env File
+cat <<EOF > "$CONF_DIR/env"
+HA_URL='$IN_URL'
+HA_WEBHOOK='$IN_WEBHOOK'
+EOF
+chmod 600 "$CONF_DIR/env"
+
+# Create Listener Script
+cat <<'EOF' > "$BIN_PATH"
+#!/bin/bash
+source "$HOME/.config/ha-lock/env"
+HA_ENDPOINT="$HA_URL/api/webhook/$HA_WEBHOOK"
+
+update_ha() {
+  local state=$1
+  echo "$(date): ACTION - Attempting to sync state '$state'"
+
+  # Capture body, headers, and the status code
+  OUT=$(curl -s -i -w "\nHTTP_STATUS:%{http_code}" -X POST \
+       -H "Content-Type: application/json" \
+       -d "{\"state\": \"$state\"}" \
+       "$HA_ENDPOINT")
+
+  STATUS=$(echo "$OUT" | awk -F':' '/^HTTP_STATUS:/ {print $2}')
+  BODY=$(echo "$OUT" | sed '/^HTTP_STATUS:/d')
+
+  if [[ "$STATUS" != "200" && "$STATUS" != "201" ]]; then
+    echo -e "$(date): ERROR HTTP $STATUS\n--- HTTP DUMP ---\n$BODY\n-----------------" >&2
+  else
+    echo -e "$(date): SUCCESS HTTP $STATUS\n--- HTTP DUMP ---\n$BODY\n-----------------"
+  fi
+}
+
+get_lock_state() {
+    gdbus call --system --dest org.freedesktop.login1 --object-path /org/freedesktop/login1/session/auto --method org.freedesktop.DBus.Properties.Get org.freedesktop.login1.Session LockedHint | grep -q "true" && echo "on" || echo "off"
+}
+
+( while true; do sleep 300; update_ha "$(get_lock_state)"; done ) &
+
+update_ha "$(get_lock_state)"
+gdbus monitor -y -d org.freedesktop.login1 | while read -r line; do
+  [[ "$line" == *"LockedHint': <true>"* ]] && update_ha "on"
+  [[ "$line" == *"LockedHint': <false>"* ]] && update_ha "off"
+done
+EOF
+
+chmod +x "$BIN_PATH"
+
+# Create Systemd Service
+cat <<EOF > "$SERVICE_PATH"
+[Unit]
+Description=Home Assistant Linux Lock Listener
+After=network.target
+
+[Service]
+ExecStart=$BIN_PATH
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+EOF
+
+systemctl --user daemon-reload
+systemctl --user enable ha-lock.service
+systemctl --user restart ha-lock.service
+
+echo "-------------------------------------------------------"
+echo "Setup Complete! Check detailed logs with:"
+echo "journalctl --user -u ha-lock.service -f"
