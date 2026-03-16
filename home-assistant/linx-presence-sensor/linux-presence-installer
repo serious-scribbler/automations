@@ -22,19 +22,19 @@ if [[ "$1" == "--uninstall" ]]; then uninstall; fi
 # --- INSTALLER LOGIC ---
 mkdir -p ~/.local/bin ~/.config/ha-lock ~/.config/systemd/user/
 
-echo "--- Home Assistant Linux Lock Setup (Webhook Edition) ---"
+echo "--- Home Assistant Linux Presence Setup ---"
 
 while true; do
     read -p "Enter HA URL (e.g., http://192.168.1.50:8123): " IN_URL
     IN_URL=$(echo "$IN_URL" | sed 's:/*$::')
-    read -p "Enter Webhook ID (e.g., 67f51aa4d11340af409d166f): " IN_WEBHOOK
+    read -p "Enter Webhook ID (e.g., your_24_char_string): " IN_WEBHOOK
 
     echo -e "\nTesting connection..."
 
-    # Perform test capturing headers (-i), body, and appending HTTP code
+    # Perform test sending "on" (Present) to verify
     TEST_RES=$(curl -s -i -w "\nHTTP_STATUS:%{http_code}" -X POST \
         -H "Content-Type: application/json" \
-        -d "{\"state\": \"off\"}" \
+        -d "{\"state\": \"on\"}" \
         "$IN_URL/api/webhook/$IN_WEBHOOK")
 
     HTTP_STATUS=$(echo "$TEST_RES" | awk -F':' '/^HTTP_STATUS:/ {print $2}')
@@ -44,7 +44,6 @@ while true; do
     echo "$RAW_RESPONSE"
     echo "--------------------------"
 
-    # Webhooks in HA typically return 200 OK with an empty body on success
     if [[ "$HTTP_STATUS" == "200" || "$HTTP_STATUS" == "201" ]]; then
         echo "✅ Success! Webhook triggered successfully."
         break
@@ -90,15 +89,16 @@ update_ha() {
 }
 
 get_lock_state() {
-    gdbus call --system --dest org.freedesktop.login1 --object-path /org/freedesktop/login1/session/auto --method org.freedesktop.DBus.Properties.Get org.freedesktop.login1.Session LockedHint | grep -q "true" && echo "on" || echo "off"
+    # If LockedHint is true, user is AWAY (off). If false, user is PRESENT (on).
+    gdbus call --system --dest org.freedesktop.login1 --object-path /org/freedesktop/login1/session/auto --method org.freedesktop.DBus.Properties.Get org.freedesktop.login1.Session LockedHint | grep -q "true" && echo "off" || echo "on"
 }
 
 ( while true; do sleep 300; update_ha "$(get_lock_state)"; done ) &
 
 update_ha "$(get_lock_state)"
 gdbus monitor -y -d org.freedesktop.login1 | while read -r line; do
-  [[ "$line" == *"LockedHint': <true>"* ]] && update_ha "on"
-  [[ "$line" == *"LockedHint': <false>"* ]] && update_ha "off"
+  [[ "$line" == *"LockedHint': <true>"* ]] && update_ha "off"
+  [[ "$line" == *"LockedHint': <false>"* ]] && update_ha "on"
 done
 EOF
 
