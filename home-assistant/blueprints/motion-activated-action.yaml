@@ -1,0 +1,59 @@
+blueprint:
+  name: Generic Motion-Triggered Action
+  description: Executes custom actions when motion is detected, waits a strict 2 minutes, and executes a shut-off action when the sensor clears.
+  domain: automation
+  input:
+    motion_sensor:
+      name: Motion Sensor
+      description: The binary sensor that detects movement in the room.
+      selector:
+        entity:
+          domain: binary_sensor
+    custom_conditions:
+      name: Trigger Conditions
+      description: Optional. Add any conditions that must be true for the automation to run.
+      default: []
+      selector:
+        condition: {}
+    action_turn_on:
+      name: Turn On Action
+      description: Define exactly what should happen when motion is detected (e.g., turn on a fan, set a light to 50%).
+      default: []
+      selector:
+        action: {}
+    action_turn_off:
+      name: Turn Off Action
+      description: Define exactly what should happen when motion clears (e.g., turn off the device).
+      default: []
+      selector:
+        action: {}
+
+mode: restart
+
+trigger:
+  - platform: state
+    entity_id: !input motion_sensor
+    to: "on"
+
+# Evaluates the optional conditions set in the UI
+condition: !input custom_conditions
+
+variables:
+  motion_entity: !input motion_sensor
+
+action:
+  # 1. Execute the user-defined Turn On Action(s)
+  # The 'choose' block with a default is the standard way to safely inject action inputs in HA
+  - choose:
+      default: !input action_turn_on
+
+  # 2. Enforce the strict 2-minute minimum
+  - delay:
+      minutes: 2
+
+  # 3. Wait for the motion sensor to report clear
+  - wait_template: "{{ is_state(motion_entity, 'off') }}"
+
+  # 4. Execute the user-defined Turn Off Action(s)
+  - choose:
+      default: !input action_turn_off
